@@ -9,7 +9,8 @@ import os
 import sys
 
 if __name__ == "__main__":   # Job task: make "from src import ..." work
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    script = globals().get("__file__") or sys.argv[0]   # Databricks script tasks do not define __file__
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(script))))
 
 import uuid
 from datetime import datetime, timezone
