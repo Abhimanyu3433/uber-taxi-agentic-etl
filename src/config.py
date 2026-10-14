@@ -32,6 +32,9 @@ SECRET_KEYS = {
     "tenant_id": "sp-tenant-id",
     "client_secret": "sp-client-secret",
     "foundry_api_key": "foundry-api-key",   # only needed if FOUNDRY_AUTH_MODE = "key"
+    # not secret, but kept in Key Vault so no cluster settings need editing:
+    "foundry_endpoint": "foundry-endpoint",
+    "foundry_deployment": "foundry-deployment",
 }
 
 CONTAINERS = ["raw", "bronze", "silver", "gold", "quarantine", "reports"]
@@ -205,6 +208,14 @@ QUALITY_THRESHOLDS = {
 # 6. Pipeline / Databricks Job settings
 # ---------------------------------------------------------------------------
 LOAD_MODE = _env("LOAD_MODE", "full")            # "full" or "incremental" (by booking date)
+# Date range the data is expected to cover (timeliness check). Profiling: 2024-01-01..2024-12-30
+EXPECTED_START_DATE = _env("EXPECTED_START_DATE", "2024-01-01")
+EXPECTED_END_DATE = _env("EXPECTED_END_DATE", "2024-12-30")
+# Tasks the Job runs by default; agents pass a subset, e.g. "bronze,silver"
+DEFAULT_JOB_TASKS = "bronze,silver,quality,gold"
+JOB_NAME = _env("JOB_NAME", "uber-taxi-etl")
+CLUSTER_NAME = _env("CLUSTER_NAME", "uber-etl-cluster")
+ALERT_EMAIL = _env("ALERT_EMAIL", "")            # failure alerts for the Databricks Job
 DATABRICKS_HOST = _env("DATABRICKS_HOST", "")    # e.g. https://adb-xxxx.azuredatabricks.net
 ETL_JOB_ID = _env("ETL_JOB_ID", "")              # set after the Job is created (Stage 11)
 JOB_TIMEOUT_SECONDS = int(_env("JOB_TIMEOUT_SECONDS", "1800"))
@@ -258,6 +269,17 @@ def get_secret(spark, name):
         if value is None:
             raise RuntimeError(f"Secret '{key}' not found in scope '{SECRET_SCOPE}' or environment")
         return value
+
+
+def get_setting(spark, env_name, secret_name, default=""):
+    """A setting from the environment, else the secret scope, else a default."""
+    value = os.environ.get(env_name)
+    if value:
+        return value
+    try:
+        return get_secret(spark, secret_name)
+    except Exception:
+        return default
 
 
 def configure_adls(spark):
