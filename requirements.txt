@@ -1,27 +1,9 @@
-# uber-taxi-agentic-etl dependencies
-#
-# On Databricks, pyspark and delta-spark are already part of the Databricks Runtime.
-# Install only the "cluster libraries" section on the cluster (Compute > Libraries > PyPI).
-# The full list is for local unit testing.
-
-# --- Provided by Databricks Runtime (needed only for local tests) ---
-pyspark>=3.5
-delta-spark>=3.1
-
-# --- Cluster libraries: Azure access ---
-azure-identity>=1.15
-azure-storage-file-datalake>=12.14
-
-# --- Cluster libraries: Databricks Jobs API ---
-databricks-sdk>=0.30
-
-# --- Cluster libraries: Microsoft Foundry GPT client ---
-openai>=1.40
-
-# --- Cluster libraries: agent framework ---
-langgraph>=0.2
-langchain-core>=0.3
-
-# --- Testing ---
-pytest>=8.0
-pandas>=2.0
+# pyspark and delta-spark are included in the Databricks Runtime.
+# Install the rest on the cluster (Compute > Libraries > PyPI).
+pyspark
+delta-spark
+azure-identity
+azure-storage-file-datalake
+databricks-sdk
+openai
+langgraph

@@ -1,118 +1,113 @@
 # uber-taxi-agentic-etl
 
-Capstone Project 3: an **agentic ETL pipeline** for Uber ride-booking data (Delhi NCR, 150,000 bookings, 2024).
+Capstone Project 3: an ETL pipeline for Uber ride-booking data built with PySpark on Azure Databricks, with data
+stored in ADLS Gen2 (medallion layers: Bronze, Silver, Gold). A LangGraph multi-agent system, powered by a GPT model
+on Microsoft Foundry, runs, validates and reports on the pipeline.
 
-* **Phase 1:** a PySpark medallion pipeline on **Azure Databricks**, with data in **ADLS Gen2**:
-  Raw CSV → Bronze → Silver (+ Quarantine) → Gold. It has automated data-quality checks and runs as a **Databricks Job**.
-* **Phase 2:** a **LangGraph** multi-agent system powered by a **GPT model on Microsoft Foundry**. The agents run the
-  Job, validate every layer, stop on failures, explain them in plain language, and write a run report.
-
-```
-ADLS Gen2 (stuberetlabhi01)                Azure Databricks (dbw-uber-etl)                  Microsoft Foundry
-raw/uber_rides/*.csv ──► bronze ──► silver ──► gold/<8 tables>         GPT deployment
-                                   └─► quarantine                     ▲
-reports/  ◄── quality_results, run_history, runs/<run_id>.json|md ◄── agents (supervisor → etl → quality → analytics | explain)
-Secrets: Azure Key Vault ──► Databricks secret scope "uber-etl-scope" (service principal sp-uber-etl)
-```
-
-## Repository layout
+## Repository structure
 
 ```
 uber-taxi-agentic-etl/
-├── data/                     sample_rides.csv (152-row test sample), schema.json
-├── notebooks/
-│   ├── setup.ipynb           Spark session, ADLS access, containers, UC schema, connectivity test
-│   ├── setup_foundry.py      Foundry GPT connection test (Entra ID auth)
-│   ├── profiling             data profiling (status values, null patterns, VTAT/CTAT, date format)
-│   ├── run_tests.py          runs the pytest suite
-│   ├── phase1_pipeline.py    runs and inspects Bronze → Silver → quality → Gold
-│   ├── fault_injection.py    Phase 1 exit criteria: checks fail correctly on corrupted data
-│   ├── create_job.py         creates/updates the Databricks Job as code and runs it once
-│   ├── jobs/run_task.py      the notebook every Job task runs (bronze | silver | quality | gold)
-│   ├── agent_demo.py         Phase 2 demo: graph, full run, validation, guardrail, question
-│   └── evaluation.py         Phase 2 fault injection + evaluation metrics
-├── src/
-│   ├── config.py             all paths, thresholds, allowed values, model and guardrail settings
-│   ├── etl_pipeline.py       Raw → Bronze → Silver (+ Quarantine)
-│   ├── gold_analytics.py     Silver → 8 Gold tables, OPTIMIZE / Z-ORDER
-│   ├── quality_checks.py     reusable rules returning structured results
-│   ├── agents.py             Foundry client, tools, guardrails, LangGraph supervisor + 4 agents
-│   └── fault_injection.py    test harness that corrupts the landing zone (human use only)
-├── tests/                    pytest unit tests (Bronze, Silver, Gold, quality)
-├── requirements.txt
-└── .env.example              every setting by name (no secret values)
+  data/
+    sample_rides.csv        152-row sample of the source file (clean)
+    corrupted_rides.csv     the same rows with deliberate faults (for tests)
+    schema.json             the 21-column source schema
+  notebooks/
+    setup.ipynb             Spark session, ADLS access, containers, schema, connectivity, Foundry test
+    profiling.ipynb         data profiling
+    test_pipeline.ipynb     Phase 1 unit tests + end-to-end check of the full tables
+    run_agents.ipynb        Phase 2: agent runs, failure scenarios, evaluation metrics
+  src/
+    config.py               paths, storage account, thresholds, model settings
+    etl_pipeline.py         Raw -> Bronze -> Silver (+ quarantine)
+    gold_analytics.py       Silver -> Gold tables
+    quality_checks.py       data quality rules returning structured pass/fail results
+    agents.py               LangGraph supervisor + etl, quality, analytics, explain agents, tools, Foundry client
+  requirements.txt
+  .env.example
 ```
 
-## Setup (one time)
+## Setup
 
-| # | Where | What |
-|---|---|---|
-| 1 | Azure portal | Resource group `rg-uber-etl` (East US 2) |
-| 2 | Azure portal | Storage account `stuberetlabhi01` with **hierarchical namespace**; containers `raw bronze silver gold quarantine reports`; CSV uploaded to `raw/uber_rides/` |
-| 3 | Entra ID | App registration `sp-uber-etl` + client secret; role **Storage Blob Data Contributor** on the storage account |
-| 4 | Key Vault | `kv-uber-etl-abhi01` with secrets `sp-client-id`, `sp-tenant-id`, `sp-client-secret` |
-| 5 | Databricks | Workspace `dbw-uber-etl` (Premium, Hybrid); Key Vault-backed secret scope `uber-etl-scope` (`#secrets/createScope`) |
-| 6 | Databricks | Cluster `uber-etl-cluster`: single node, latest LTS runtime, **Dedicated** access mode, 20-min auto-termination; PyPI libraries `azure-identity azure-storage-file-datalake databricks-sdk openai langgraph langchain-core` |
-| 7 | Databricks | Git folder linked to this repo; run `notebooks/setup.ipynb` |
+1. **Azure:** create resource group `rg-uber-etl`, and a storage account `stuberetlabhi01` with hierarchical
+   namespace (ADLS Gen2). Create the containers `raw`, `bronze`, `silver`, `gold`, `quarantine` and `reports`,
+   then upload the CSV to `raw/uber_rides/`.
+2. **Service principal:** create `sp-uber-etl` with a client secret, and give it the role
+   **Storage Blob Data Contributor** on the storage account.
+3. **Key Vault and secret scope:** store `sp-client-id`, `sp-tenant-id` and `sp-client-secret` in Key Vault
+   `kv-uber-etl-abhi01`. Create the Key Vault-backed Databricks secret scope `uber-etl-scope`.
+4. **Databricks:** in workspace `dbw-uber-etl`, create cluster `uber-etl-cluster` (single node, LTS runtime,
+   Dedicated access mode). Install these libraries from PyPI: `azure-identity`, `azure-storage-file-datalake`,
+   `databricks-sdk`, `openai`, `langgraph`.
+5. **Git folder:** link this repository as a Databricks Git folder, then run `notebooks/setup.ipynb`
+   (except its last cell, which needs Phase 2 setup).
 
-Secrets never appear in code. `config.configure_adls(spark)` reads them from the secret scope at runtime.
-
-### Phase 2 setup (Microsoft Foundry)
-1. In Microsoft Foundry ([ai.azure.com](https://ai.azure.com)), create a project/resource in `rg-uber-etl` and **deploy a GPT model**
-   (e.g. a GPT-4o-mini / GPT-4.1-mini class model). Note the **endpoint** and the **deployment name**.
-2. On the Foundry / Azure OpenAI resource, go to **Access control (IAM)** and give `sp-uber-etl` the role **Cognitive Services OpenAI User**.
-   This lets the agents use Entra ID authentication instead of an API key.
-3. In Key Vault, add the secrets `foundry-endpoint` and `foundry-deployment`.
-4. Run `notebooks/setup_foundry.py`. It should print `✓ Foundry GPT reachable`.
+No secrets are in code: `config.configure_adls(spark)` reads them from the secret scope.
 
 ## Execution order
 
-| Step | Notebook | Result |
+| Step | What | Result |
 |---|---|---|
-| 1 | `setup.ipynb` | ADLS reachable, containers and schema ready |
-| 2 | `profiling` | data understood (see findings below) |
-| 3 | `run_tests.py` | all unit tests pass |
-| 4 | `phase1_pipeline.py` | Bronze 150,000 / Silver ≈148,767 / Quarantine ≈1,233 / 8 Gold tables; all hard checks PASS |
-| 5 | `fault_injection.py` | every corrupted scenario stopped by the right rule; healthy run passes |
-| 6 | `create_job.py` | Job `uber-taxi-etl` created and run once on demand → **Phase 1 complete** |
-| 7 | `setup_foundry.py` | GPT reachable |
-| 8 | `agent_demo.py` | agent graph, full / validation / incremental / guarded / question runs, reports in `reports/runs/` |
-| 9 | `evaluation.py` | detection, false-alarm, recovery rates, time saved, tokens and latency |
+| 1 | `notebooks/setup.ipynb` | ADLS reachable, containers and schema ready |
+| 2 | `notebooks/profiling.ipynb` | data profiled |
+| 3 | `notebooks/test_pipeline.ipynb` (all cells except the last) | unit tests pass on clean data and fail correctly on corrupted data |
+| 4 | Create the Databricks Job (below) | Job `uber-taxi-etl` |
+| 5 | **Run now** on the Job | full pipeline on the full CSV |
+| 6 | Last cell of `test_pipeline.ipynb` | all checks pass on the full tables (end of Phase 1) |
+| 7 | Phase 2 setup (below), then the last cell of `setup.ipynb` | Foundry GPT reachable |
+| 8 | `notebooks/run_agents.ipynb` | agent runs, failure scenarios, evaluation metrics, reports in `reports/runs/` |
 
-## Data findings (profiling)
-* 150,000 rows × 21 columns, every day from 2024-01-01 to 2024-12-30 (365 days, 355-452 bookings/day).
-* **Date format is `yyyy-MM-dd`**, not the `dd-MM-yyyy` the specification states. The parser accepts both.
-* IDs are stored as `"""CNR5884300"""` (embedded quotes). They are read with `escape='"'` and stripped in Bronze.
-* 5 statuses: Completed 93,000, Cancelled by Driver 27,000, No Driver Found 10,500, Cancelled by Customer 10,500, Incomplete 9,000.
-* Flags match the status exactly, and each reason is present exactly when its flag is set (0 inconsistencies).
-* **VTAT** (vehicle turnaround time) is present for every booking except *No Driver Found*: the time for a vehicle to reach the pickup.
-  **CTAT** (customer turnaround time) is present only for Completed and Incomplete rides: the trip time once the customer is on board.
-* 1,224 Booking IDs appear more than once (1,233 extra rows) with **different** dates and customers. These are ID collisions, with no
-  identical rows. Silver keeps the earliest booking per ID and quarantines the rest with reason `duplicate_booking_id`.
+### Databricks Job `uber-taxi-etl`
 
-## Design decisions
-* **Bronze keeps every column as text.** Silver casts the types, so a malformed value is quarantined (and visible) instead of
-  silently becoming null.
-* **Idempotent writes.** Full loads overwrite; incremental loads replace only their booking-date range with Delta `replaceWhere`.
-* **Quarantine instead of drop.** Every rejected row keeps its original values plus a `reject_reasons` array.
-* **Hard vs soft rules.** Hard rules (schema, key completeness, null spike, duplicate spike, timeliness, volume, Silver
-  cleanliness, reconciliation, quarantine rate ≤ 2%) stop the run. Soft rules (individual validity and consistency issues) are
-  warnings; their rows are quarantined. The LLM classifies severity and explains, but **can never downgrade a hard rule**.
-* **Unity Catalog workspace.** The Hive metastore is disabled, so the Delta tables are path-based in ADLS; the schema
-  `dbw_uber_etl.uber_etl` is the project namespace. Registering the tables as UC external tables is future work.
+Job parameters: `mode` = `full`, `start_date` = (empty), `end_date` = (empty).
 
-## Agents (Phase 2)
+| Task | Type | File | Parameters | Depends on |
+|---|---|---|---|---|
+| `bronze` | Python script | `src/etl_pipeline.py` | `["--layer","bronze","--mode","{{job.parameters.mode}}","--start-date","{{job.parameters.start_date}}","--end-date","{{job.parameters.end_date}}"]` | none |
+| `silver` | Python script | `src/etl_pipeline.py` | the same, with `silver` | bronze |
+| `quality` | Python script | `src/quality_checks.py` | `["--layers","bronze,silver"]` | silver |
+| `gold` | Python script | `src/gold_analytics.py` | `[]` | quality |
+
+Every task runs on `uber-etl-cluster` with **Retries: 1**. Under Job notifications, add an e-mail alert **on failure**.
+The `quality` task fails when any hard rule fails, which stops `gold` and sends the alert.
+The `etl` agent runs only the `bronze` and `silver` tasks.
+
+### Phase 2 setup (Microsoft Foundry)
+
+1. Deploy a GPT model in Microsoft Foundry. Note the endpoint and the deployment name.
+2. On the Foundry resource, under **Access control (IAM)**, give `sp-uber-etl` the role **Cognitive Services OpenAI User**.
+   This enables Microsoft Entra ID authentication, so no API key is needed.
+3. In Key Vault, add the secrets `foundry-endpoint` and `foundry-deployment`.
+
+## Profiling findings
+
+* 150,000 rows and 21 columns, covering every day from 2024-01-01 to 2024-12-30.
+* The Date column is `yyyy-MM-dd` in the file, not `dd-MM-yyyy` as the specification states. The parser accepts both.
+* There are 5 Booking Status values: Completed, Cancelled by Driver, Cancelled by Customer, No Driver Found and Incomplete.
+* VTAT (vehicle turnaround time) is present except for No Driver Found. CTAT (customer turnaround time) is present only
+  for Completed and Incomplete rides.
+* 1,224 Booking IDs appear more than once (1,233 extra rows). Silver keeps the earliest and quarantines the others.
+
+## Data quality rules
+
+The rules are in `src/quality_checks.py`, and their thresholds and hard/soft flags are in `config.QUALITY_RULES`:
+completeness, outcome completeness, uniqueness, validity, consistency, timeliness, volume versus the previous load,
+Bronze-to-Silver reconciliation, and Gold checks (totals reconcile with Silver, no missing dates, rates plausible
+versus history). A failed hard rule stops the run. The LLM can never override it.
+
+## Agents
+
 | Node | Role | Tools |
 |---|---|---|
-| `supervisor` | GPT classifies the request (JSON) → `run_etl` / `quality` / `analytics` / `explain`, with a keyword fallback | Foundry client |
-| `etl` | triggers the Job with `tasks=bronze,silver`, polls it, collects task output/errors; GPT explains failures | `run_etl_job`, `get_run_status` |
-| `quality` | runs Bronze + Silver checks, reconciles counts, GPT classifies severity; stops on any hard failure | `run_quality_checks`, `compare_row_counts` |
-| `analytics` | builds Gold, validates it (reconciles with Silver, no missing dates, plausible rates) | `run_gold_analytics`, `run_quality_checks` |
-| `explain` | answers questions from run history, quality results and table stats (read-only); writes every run report | `get_table_stats`, `write_report` |
+| supervisor | GPT routes the request to `etl`, `quality`, `analytics` or `explain` | Foundry GPT client |
+| etl | runs the Job (Bronze and Silver), polls it, collects output; ends the run on failure | `run_etl_job`, `get_run_status` |
+| quality | runs the Bronze and Silver checks; GPT classifies severity; ends the run if a hard rule fails | `run_quality_checks`, `compare_row_counts` |
+| analytics | builds the Gold tables and validates them | `gold_analytics.py`, `run_quality_checks` |
+| explain | answers questions from run reports and table stats; writes the run report to `reports/runs/` | `get_table_stats`, `write_report` |
 
-**Guardrails:** approved tools only; agents may write only under `reports/`; a full refresh or a backfill over 31 days needs
-explicit human approval (`AgentSystem(spark, approvals={...})`); Booking and Customer IDs are masked before prompts; every
-tool call is logged; tokens are capped per call and per run; retries, steps and job time are capped.
-
-## Cost control
-A single-node cluster with 20-minute auto-termination. A small GPT model with a token cap per run. Delete the resource group `rg-uber-etl` when finished.
+**Guardrails:**
+* Agents can use only the approved tools and can write only to `reports/runs/`.
+* A full reload (overwrite), or a backfill over 31 days, needs human approval.
+* Booking and Customer IDs are masked in prompts.
+* Every tool call is logged in the run report.
+* Token use, retries, graph steps and job time are capped.
