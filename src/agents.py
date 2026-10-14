@@ -128,7 +128,7 @@ class Tools:
         for t in run.tasks:
             output = self.ws.jobs.get_run_output(run_id=t.run_id)
             tasks.append({"task": t.task_key, "state": t.state.result_state.value if t.state.result_state else None,
-                          "error": output.error, "logs": (output.logs or "")[-1500:]})
+                          "error": output.error, "logs": (output.logs or output.error_trace or "")[-1500:]})
         return {"result": run.state.result_state.value if run.state.result_state else run.state.life_cycle_state.value,
                 "run_page_url": run.run_page_url, "tasks": tasks}
 
@@ -181,9 +181,16 @@ ROUTER_PROMPT = ("You route requests for an Uber ride-booking ETL pipeline (Bron
                  'Return {"route": "run_etl" | "quality" | "analytics" | "explain"}. '
                  "run_etl = load or reload data; quality = validate Bronze and Silver; "
                  "analytics = rebuild and validate Gold; explain = a question about runs, data or results.")
-SEVERITY_PROMPT = ("You are a data-quality engineer. For each failed check (structured results, no raw data) return "
+SEVERITY_PROMPT = ("You are a data-quality engineer for an Uber ride-booking pipeline. For each failed check "
+                   "(structured results, no raw data) return "
                    '{"findings": [{"rule", "severity": "critical"|"warning"|"info", "explanation", '
-                   '"recommended_action"}]}. Explain the likely cause citing the metric and threshold.')
+                   '"recommended_action"}]}. Explain the likely cause citing the metric and threshold. '
+                   "Meaning of the rules: metric_value is the SHARE of rows failing (0.05 = 5%) unless noted; "
+                   "consistency_flag_matches_status = a cancellation/incomplete flag (1 or null) contradicts Booking Status; "
+                   "consistency_reason_present_with_flag = a reason column is filled without its flag or vice versa; "
+                   "uniqueness_* = share of duplicate Booking IDs; timeliness_missing_days = number of dates with no data; "
+                   "volume_vs_previous_load = share by which the row count DROPPED versus the previous load; "
+                   "reconciliation_bronze_silver = rows missing between Bronze and Silver + Quarantine.")
 FAILURE_PROMPT = ("A Databricks Job task of the Uber ride ETL failed. From the error and log tail return "
                   '{"explanation": "<plain-language root cause>", "recommended_action": "<fix>"}.')
 EXPLAIN_PROMPT = ("Answer the question about the Uber ride ETL pipeline in plain language using only the context "
@@ -222,7 +229,9 @@ class AgentSystem:
                                   "explanation": str(e), "recommended_action": "Approve the action and re-run."}]}
         if status["result"] == "SUCCESS":
             return {"nodes_run": ["etl"]}
-        failed = next((t for t in status["tasks"] if t["state"] != "SUCCESS"), {"task": "job", "error": status["result"]})
+        # the task that actually failed (tasks not run by the agent show as EXCLUDED and are ignored)
+        failed = next((t for t in status["tasks"] if t["state"] in ("FAILED", "TIMEDOUT", "INTERNAL_ERROR")),
+                      {"task": "job", "error": status["result"]})
         ai = self.llm.ask_json(FAILURE_PROMPT, {"task": failed["task"], "error": failed.get("error"),
                                                 "log_tail": failed.get("logs", "")[-800:]})
         return {"nodes_run": ["etl"], "status": "FAIL", "stopped_at": "etl", "escalated_to_human": True,
